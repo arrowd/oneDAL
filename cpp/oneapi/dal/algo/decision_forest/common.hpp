@@ -613,7 +613,9 @@ public:
     }
 
     /// Engine method for the random numbers generator used by the algorithm
-    /// @remark default = engine_method::philox4x32x10
+    /// @remark default = engine_type::philox4x32x10
+    /// @remark On builds with the reference RNG backend (OpenBLAS builds), `mt2203` avoids a
+    ///         per-tree skip-ahead whose cost grows with the number of trees and rows.
     engine_type get_engine_type() const {
         return base_t::get_engine_type();
     }
@@ -683,14 +685,11 @@ public:
     ///                             bool operator()(const decision_forest::leaf_node_info<Task>&)
     template <typename T, typename Visitor>
     void traverse_depth_first(T&& visitor_array) const {
-        dal::detail::threader_for(this->get_tree_count(),
-                                  this->get_tree_count(),
-                                  [&](std::int64_t i) {
-                                      traverse_depth_first_impl(
-                                          i,
-                                          decision_tree::detail::make_node_visitor<dtree_task_t>(
-                                              std::forward<Visitor>(visitor_array[i])));
-                                  });
+        dal::detail::threader_for(this->get_tree_count(), 1, [&](std::int64_t i) {
+            traverse_depth_first_impl(i,
+                                      decision_tree::detail::make_node_visitor<dtree_task_t>(
+                                          std::forward<Visitor>(visitor_array[i])));
+        });
     }
 
     /// Performs Breadth First Traversal of i-th tree
@@ -712,14 +711,11 @@ public:
     ///                             bool operator()(const decision_forest::leaf_node_info<Task>&)
     template <typename T, typename Visitor>
     void traverse_breadth_first(T&& visitor_array) const {
-        dal::detail::threader_for(this->get_tree_count(),
-                                  this->get_tree_count(),
-                                  [&](std::int64_t i) {
-                                      traverse_breadth_first_impl(
-                                          i,
-                                          decision_tree::detail::make_node_visitor<dtree_task_t>(
-                                              std::forward<Visitor>(visitor_array[i])));
-                                  });
+        dal::detail::threader_for(this->get_tree_count(), 1, [&](std::int64_t i) {
+            traverse_breadth_first_impl(i,
+                                        decision_tree::detail::make_node_visitor<dtree_task_t>(
+                                            std::forward<Visitor>(visitor_array[i])));
+        });
     }
 
 protected:

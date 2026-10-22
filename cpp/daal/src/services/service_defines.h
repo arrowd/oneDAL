@@ -109,6 +109,8 @@ DAAL_EXPORT bool daal_check_is_intel_cpu();
     #define DAAL_BASE_CPU daal::internal::sve
 #elif defined(TARGET_RISCV64)
     #define DAAL_BASE_CPU daal::internal::rv64
+#elif defined(TARGET_LOONGARCH64)
+    #define DAAL_BASE_CPU daal::internal::la64
 #endif
 
 #define DAAL_CHECK_CPU_ENVIRONMENT (daal_check_is_intel_cpu())
@@ -391,7 +393,7 @@ typedef union
 
 #define COMPUTE_DAAL_VERSION(majorVersion, minorVersion, updateVersion) (majorVersion * 10000 + minorVersion * 100 + updateVersion)
 
-#if defined(_MSC_VER) || defined(DAAL_INTEL_CPP_COMPILER)
+#if (defined(_MSC_VER) || defined(DAAL_INTEL_CPP_COMPILER)) && defined(TARGET_X86_64)
     #include <immintrin.h>
     #define DAAL_PREFETCH_READ_T0(addr) _mm_prefetch((char *)addr, _MM_HINT_T0)
 #else

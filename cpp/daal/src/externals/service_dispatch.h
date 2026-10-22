@@ -40,10 +40,11 @@
 
 #elif defined(TARGET_ARM)
 
-    #define DAAL_DISPATCH_FUNCTION_BY_CPU(func, ...)                                                             \
-        switch (static_cast<daal::internal::CpuType>(daal::services::Environment::getInstance()->getCpuId()))    \
-        {                                                                                                        \
-            DAAL_KERNEL_SVE_ONLY_CODE(case daal::internal::sve : func(daal::internal::sve, __VA_ARGS__); break;) \
+    #define DAAL_DISPATCH_FUNCTION_BY_CPU(func, ...)                                                                   \
+        switch (static_cast<daal::internal::CpuType>(daal::services::Environment::getInstance()->getCpuId()))          \
+        {                                                                                                              \
+            DAAL_KERNEL_SVE_ONLY_CODE(case daal::internal::sve : func(daal::internal::sve, __VA_ARGS__); break;)       \
+        default: daal::services::throwIfPossible(daal::services::Status(daal::services::ErrorCpuNotSupported)); break; \
         }
 
 #elif defined(TARGET_RISCV64)
@@ -52,6 +53,14 @@
         switch (static_cast<daal::internal::CpuType>(daal::services::Environment::getInstance()->getCpuId()))       \
         {                                                                                                           \
             DAAL_KERNEL_RV64_ONLY_CODE(case daal::internal::rv64 : func(daal::internal::rv64, __VA_ARGS__); break;) \
+        }
+
+#elif defined(TARGET_LOONGARCH64)
+
+    #define DAAL_DISPATCH_FUNCTION_BY_CPU(func, ...)                                                                \
+        switch (static_cast<daal::internal::CpuType>(daal::services::Environment::getInstance()->getCpuId()))       \
+        {                                                                                                           \
+            DAAL_KERNEL_LA64_ONLY_CODE(case daal::internal::la64 : func(daal::internal::la64, __VA_ARGS__); break;) \
         }
 
 #endif

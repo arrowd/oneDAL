@@ -27,7 +27,7 @@ else ifeq ($(PLAT),)
 endif
 
 # Check that we know how to build for the identified platform
-PLATs := lnx32e mac32e win32e lnxarm lnxriscv64
+PLATs := lnx32e mac32e win32e lnxarm lnxriscv64 winarm lnxloongarch64
 $(if $(filter $(PLAT),$(PLATs)),,$(error Unknown platform $(PLAT)))
 
 # Non-platform or architecture specific defines live in common.mk
@@ -69,6 +69,10 @@ ifeq ($(BUILD_PARAMETERS_LIB),yes)
 $(error Building with the parameters library is not available on Windows OS)
 endif
 endif
+
+# Passed to the preprocessor that generates the pkg-config files so that they
+# name libonedal_parameters only in the separate layout.
+pkgconfig.parameters_define := $(if $(filter yes,$(BUILD_PARAMETERS_LIB)),-DPARAMETERS_LIB,)
 
 USERREQCPU := $(filter-out $(filter $(CPUs),$(REQCPU)),$(REQCPU))
 USECPUS := $(if $(REQCPU),$(if $(USERREQCPU),$(error Unsupported value/s in REQCPU: $(USERREQCPU). List of supported CPUs: $(CPUs)),$(REQCPU)),$(CPUs))
@@ -126,22 +130,33 @@ dtbb           := $(if $(OS_is_win),$(if $(MSVC_RT_is_debug),_debug,),)
 plib           := $(if $(OS_is_win),,lib)
 scr            := $(if $(OS_is_win),bat,sh)
 y              := $(notdir $(filter $(_OS)/%,lnx/so win/dll mac/dylib))
--Fo            := $(if $(OS_is_win),-Fo,-o)
--Q             := $(if $(OS_is_win),$(if $(COMPILER_is_vc),-,-Q),-)
--cxx17         := $(if $(COMPILER_is_vc),/std:c++17,$(-Q)std=c++17)
+-Fo            := $(if $(and $(OS_is_win),$(COMPILER_is_vc)),-Fo,-o)
+-Q             := $(if $(OS_is_win),$(if $(COMPILER_is_vc),-,$(if $(COMPILER_is_clang),-,-Q)),-)
+-cxx17         := $(if $(or $(COMPILER_is_vc), $(and $(OS_is_win),$(COMPILER_is_clang))),/std:c++17,$(-Q)std=c++17)
 -optlevel      := $(-optlevel.$(COMPILER))
 -fPIC          := $(if $(OS_is_win),,-fPIC)
 -visibility    := $(if $(OS_is_win),,-fvisibility=hidden -fvisibility-inlines-hidden)
+# Per-symbol sections so that the linker below can drop whatever the exported
+# entry points do not reach. Everything non-exported is already hidden.
+-sections      := $(if $(OS_is_lnx),-ffunction-sections -fdata-sections,)
+-lsections     := $(if $(OS_is_lnx),-Wl$(comma)--gc-sections,)
+# --gc-sections would also drop the GCC 13+ <iostream> reference that pins
+# GLIBCXX_3.4.32; one source file per library keeps it (see exceptions.cpp).
 -DMKL_ILP64    := $(if $(filter mkl,$(BACKEND_CONFIG)),-DMKL_ILP64)
 -DMKL_LP64     := $(if $(filter mkl,$(BACKEND_CONFIG)),-DMKL_LP64)
 -Zl            := $(-Zl.$(COMPILER))
 -Zl_DPCPP      := $(-Zl.dpcpp)
+# TBB compatibility defines, applied to every build type, host and DPC++ alike.
+-DTBBCOMPAT    := -DTBB_SUPPRESS_DEPRECATED_MESSAGES -D__TBB_LEGACY_MODE
 # if REQDBG set to 'symbols', it will disable assert checking.
 # Debug flags are defined per compiler in dev/make/compiler_definitions/ under -DEBC,
 # they are always enabled when the REQDBG flag is set.
--DEBC          := $(if $(REQDBG),$(if $(filter symbols,$(REQDBG)),$(-DEBC.$(COMPILER)),$(-DEBC.$(COMPILER)) -DDEBUG_ASSERT -DONEDAL_ENABLE_ASSERT)) -DTBB_SUPPRESS_DEPRECATED_MESSAGES -D__TBB_LEGACY_MODE
--DEBC_DPCPP    := $(if $(REQDBG),$(if $(filter symbols,$(REQDBG)),$(-DEBC.dpcpp),$(-DEBC.dpcpp) -DDEBUG_ASSERT -DONEDAL_ENABLE_ASSERT))
+-DEBC          := $(if $(REQDBG),$(if $(filter symbols,$(REQDBG)),$(-DEBC.$(COMPILER)),$(-DEBC.$(COMPILER)) -DDEBUG_ASSERT -DONEDAL_ENABLE_ASSERT)) $(-DTBBCOMPAT)
+-DEBC_DPCPP    := $(if $(REQDBG),$(if $(filter symbols,$(REQDBG)),$(-DEBC.dpcpp),$(-DEBC.dpcpp) -DDEBUG_ASSERT -DONEDAL_ENABLE_ASSERT)) $(-DTBBCOMPAT)
 -DEBL          := $(if $(REQDBG),$(if $(OS_is_win),-debug,))
+# Compression of the embedded SPIR-V fat binary. Decompressed by the runtime at JIT
+# time, so host symbols and the ABI are unchanged; it costs link time, not run time.
+-offloadcompress := --offload-compress
 -DGCOV_BUILD   := $(if $(filter yes,$(GCOV_ENABLED)),-DGCOV_BUILD)
 # NOTE: only some compilers support other sanitizers, failure is expected by design in order to not
 # quietly hide the lack of support (e.g. gnu will fail with REQSAN=memory). The sanitizer must be
@@ -505,27 +520,28 @@ CORE.objs_y     := $(CORE.objs_y) $(CORE.objs_y_tpl)
 -include $(CORE.tmpdir_a)/*.d
 -include $(CORE.tmpdir_y)/*.d
 
-# TODO: replace MKL usage with one of the suggested apporach in 'common.mk'.
-$(CORE.tmpdir_a)/$(core_a:%.$a=%_link.txt): $(CORE.objs_a) | $(CORE.tmpdir_a)/. ; $(WRITE.PREREQS)
+# Outside Windows the static and shared objects differ only in symbol visibility, so the static
+# libraries archive the shared objects instead of compiling every source twice.
+CORE.objs_a.lib := $(if $(OS_is_win),$(CORE.objs_a),$(CORE.objs_y))
+$(CORE.tmpdir_a)/$(core_a:%.$a=%_link.txt): $(CORE.objs_a.lib) | $(CORE.tmpdir_a)/. ; $(WRITE.PREREQS)
 $(CORE.tmpdir_a)/$(core_a:%.$a=%_link.$a):  LOPT:=
 $(CORE.tmpdir_a)/$(core_a:%.$a=%_link.$a):  $(CORE.tmpdir_a)/$(core_a:%.$a=%_link.txt) | $(CORE.tmpdir_a)/. ; $(LINK.STATIC)
 $(WORKDIR.lib)/$(core_a):                   LOPT:=
 $(WORKDIR.lib)/$(core_a):                   $(daaldep.math_backend.static_link_deps) $(VTUNESDK.LIBS_A) $(CORE.tmpdir_a)/$(core_a:%.$a=%_link.$a) ; $(LINK.STATIC)
 
-$(WORKDIR.lib)/$(core_y): LOPT += $(-fPIC)
+$(WORKDIR.lib)/$(core_y): LOPT += $(-fPIC) $(-lsections)
 $(WORKDIR.lib)/$(core_y): LOPT += $(daaldep.rt.seq)
 $(WORKDIR.lib)/$(core_y): LOPT += $(-lsanitize)
 $(WORKDIR.lib)/$(core_y): LOPT += $(if $(OS_is_win),-IMPLIB:$(@:%.$(MAJORBINARY).dll=%_dll.lib),)
 ifdef OS_is_win
 $(WORKDIR.lib)/$(core_y:%.$(MAJORBINARY).dll=%_dll.lib): $(WORKDIR.lib)/$(core_y)
 endif
-# TODO: replace MKL usage with one of the suggested apporach in 'common.mk'.
 $(CORE.tmpdir_y)/$(core_y:%.$y=%_link.txt): $(CORE.objs_y) $(if $(OS_is_win),$(CORE.tmpdir_y)/dll.res,) | $(CORE.tmpdir_y)/. ; $(WRITE.PREREQS)
 $(WORKDIR.lib)/$(core_y):                   $(daaldep.math_backend.shared_link_deps) $(VTUNESDK.LIBS_A) \
                                             $(CORE.tmpdir_y)/$(core_y:%.$y=%_link.txt) ; $(LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
 
 $(CORE.objs_a): $(CORE.tmpdir_a)/inc_a_folders.txt
-$(CORE.objs_a): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-sanitize) $(-DEBC) $(-DMKL_ILP64) $(-DPROFILER) $(-DSTDALLOC) $(-DGCOV_BUILD)
+$(CORE.objs_a): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-sections) $(-Zl) $(-sanitize) $(-DEBC) $(-DMKL_ILP64) $(-DPROFILER) $(-DSTDALLOC) $(-DGCOV_BUILD)
 $(CORE.objs_a): COPT += -D__TBB_NO_IMPLICIT_LINKAGE -DDAAL_NOTHROW_EXCEPTIONS \
                         -DDAAL_HIDE_DEPRECATED -DTBB_USE_ASSERT=0 -D_ENABLE_ATOMIC_ALIGNMENT_FIX \
                         $(if $(CHECK_DLL_SIG),-DDAAL_CHECK_DLL_SIG)
@@ -534,7 +550,7 @@ $(CORE.objs_a): COPT += @$(CORE.tmpdir_a)/inc_a_folders.txt
 $(eval $(call append_uarch_copt,$(CORE.objs_a)))
 
 $(CORE.objs_y): $(CORE.tmpdir_y)/inc_y_folders.txt
-$(CORE.objs_y): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-visibility) $(-sanitize) $(-DEBC) $(-DMKL_ILP64) $(-DPROFILER) $(-DSTDALLOC) $(-DGCOV_BUILD)
+$(CORE.objs_y): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-sections) $(-Zl) $(-visibility) $(-sanitize) $(-DEBC) $(-DMKL_ILP64) $(-DPROFILER) $(-DSTDALLOC) $(-DGCOV_BUILD)
 $(CORE.objs_y): COPT += -D__DAAL_IMPLEMENTATION \
                         -D__TBB_NO_IMPLICIT_LINKAGE -DDAAL_NOTHROW_EXCEPTIONS \
                         -DDAAL_HIDE_DEPRECATED -DTBB_USE_ASSERT=0 -D_ENABLE_ATOMIC_ALIGNMENT_FIX \
@@ -689,7 +705,7 @@ $(ONEAPI.tmpdir_y.dpc)/inc_y_folders.txt: | $(ONEAPI.tmpdir_y.dpc)/.
 
 # Set compilation options to the object files which are part of STATIC lib
 $(ONEAPI.objs_a): $(ONEAPI.dispatcher_cpu) $(ONEAPI.tmpdir_a)/inc_a_folders.txt
-$(ONEAPI.objs_a): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-sanitize) $(-DMKL_ILP64) $(-DEBC) $(-EHsc) $(pedantic.opts) \
+$(ONEAPI.objs_a): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-sections) $(-Zl) $(-sanitize) $(-DMKL_ILP64) $(-DEBC) $(-EHsc) $(pedantic.opts) \
                           -DDAAL_NOTHROW_EXCEPTIONS \
                           -DDAAL_HIDE_DEPRECATED \
                           -D_ENABLE_ATOMIC_ALIGNMENT_FIX \
@@ -701,7 +717,7 @@ $(eval $(call update_copt_from_dispatcher_tag,$(ONEAPI.objs_a)))
 
 # Set compilation options to the object files which are part of DYNAMIC lib
 $(ONEAPI.objs_y): $(ONEAPI.dispatcher_cpu) $(ONEAPI.tmpdir_y)/inc_y_folders.txt
-$(ONEAPI.objs_y): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-visibility) $(-sanitize) $(-DMKL_ILP64) $(-DEBC) $(-EHsc) $(pedantic.opts) \
+$(ONEAPI.objs_y): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-sections) $(-Zl) $(-visibility) $(-sanitize) $(-DMKL_ILP64) $(-DEBC) $(-EHsc) $(pedantic.opts) \
                           -DDAAL_NOTHROW_EXCEPTIONS \
                           -DDAAL_HIDE_DEPRECATED \
                           -D_ENABLE_ATOMIC_ALIGNMENT_FIX \
@@ -714,7 +730,7 @@ $(ONEAPI.objs_y): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-visibility) 
 $(eval $(call update_copt_from_dispatcher_tag,$(ONEAPI.objs_y)))
 
 $(ONEAPI.objs_y.dpc): $(ONEAPI.dispatcher_cpu) $(ONEAPI.tmpdir_y.dpc)/inc_y_folders.txt
-$(ONEAPI.objs_y.dpc): COPT += $(-fPIC) $(-cxx17) $(-optlevel.dpcpp) $(-Zl_DPCPP) $(-visibility) $(-sanitize) $(-DMKL_LP64) $(-EHsc) $(pedantic.opts.dpcpp) \
+$(ONEAPI.objs_y.dpc): COPT += $(-fPIC) $(-cxx17) $(-optlevel.dpcpp) $(-sections) $(-Zl_DPCPP) $(-visibility) $(-sanitize) $(-DMKL_LP64) $(-EHsc) $(pedantic.opts.dpcpp) \
                               -DDAAL_NOTHROW_EXCEPTIONS \
                               -DDAAL_HIDE_DEPRECATED \
                               -DONEDAL_DATA_PARALLEL \
@@ -750,10 +766,10 @@ $(foreach x,$(PARAMETERS.objs_y.dpc.filtered),$(eval $(call .ONEAPI.compile,$x,$
 
 # Create Host and DPC++ oneapi libraries
 ifeq ($(BUILD_PARAMETERS_LIB),yes)
-$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(oneapi_a),$(ONEAPI.objs_a.filtered)))
-$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(parameters_a),$(PARAMETERS.objs_a.filtered)))
+$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(oneapi_a),$(if $(OS_is_win),$(ONEAPI.objs_a.filtered),$(ONEAPI.objs_y.filtered))))
+$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(parameters_a),$(if $(OS_is_win),$(PARAMETERS.objs_a.filtered),$(PARAMETERS.objs_y.filtered))))
 else
-$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(oneapi_a),$(ONEAPI.objs_a)))
+$(eval $(call .ONEAPI.declare_static_lib,$(WORKDIR.lib)/$(oneapi_a),$(if $(OS_is_win),$(ONEAPI.objs_a),$(ONEAPI.objs_y))))
 endif
 
 ONEAPI.objs_y.lib := $(ONEAPI.objs_y.filtered)
@@ -766,7 +782,7 @@ $(ONEAPI.tmpdir_y)/$(oneapi_y:%.$y=%_link.txt): \
 $(WORKDIR.lib)/$(oneapi_y): \
     $(daaldep.math_backend.shared_link_deps) \
     $(ONEAPI.tmpdir_y)/$(oneapi_y:%.$y=%_link.txt) ; $(LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
-$(WORKDIR.lib)/$(oneapi_y): LOPT += $(-fPIC)
+$(WORKDIR.lib)/$(oneapi_y): LOPT += $(-fPIC) $(-lsections)
 $(WORKDIR.lib)/$(oneapi_y): LOPT += $(daaldep.rt.seq)
 $(WORKDIR.lib)/$(oneapi_y): LOPT += $(-lsanitize)
 $(WORKDIR.lib)/$(oneapi_y): LOPT += $(if $(OS_is_win),-IMPLIB:$(@:%.$(MAJORBINARY).dll=%_dll.lib),)
@@ -781,7 +797,7 @@ $(ONEAPI.tmpdir_y)/$(parameters_y:%.$y=%_link.txt): \
 $(WORKDIR.lib)/$(parameters_y): \
     $(WORKDIR.lib)/$(oneapi_y) $(daaldep.ipp) $(daaldep.vml) $(daaldep.mkl) \
     $(ONEAPI.tmpdir_y)/$(parameters_y:%.$y=%_link.txt) ; $(LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
-$(WORKDIR.lib)/$(parameters_y): LOPT += $(-fPIC)
+$(WORKDIR.lib)/$(parameters_y): LOPT += $(-fPIC) $(-lsections)
 $(WORKDIR.lib)/$(parameters_y): LOPT += $(daaldep.rt.seq)
 $(WORKDIR.lib)/$(parameters_y): LOPT += $(-lsanitize)
 $(WORKDIR.lib)/$(parameters_y): LOPT += $(if $(OS_is_win),-IMPLIB:$(@:%.$(MAJORBINARY).dll=%_dll.lib),)
@@ -800,9 +816,9 @@ $(ONEAPI.tmpdir_y.dpc)/$(oneapi_y.dpc:%.$y=%_link.txt): \
     $(ONEAPI.objs_y.dpc.lib) $(if $(OS_is_win),$(ONEAPI.tmpdir_y.dpc)/dll.res,) | $(ONEAPI.tmpdir_y.dpc)/. ; $(WRITE.PREREQS)
 $(WORKDIR.lib)/$(oneapi_y.dpc): \
     $(ONEAPI.tmpdir_y.dpc)/$(oneapi_y.dpc:%.$y=%_link.txt) ; $(DPC.LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
-$(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(-fPIC)
+$(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(-fPIC) $(-lsections)
 $(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(daaldep.rt.dpc)
-$(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(if $(REQDBG),-flink-huge-device-code --offload-compress,)
+$(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(if $(REQDBG),-flink-huge-device-code,) $(-offloadcompress)
 ifndef OS_is_win
 $(WORKDIR.lib)/$(oneapi_y.dpc): LOPT += $(-lsanitize.dpc)
 endif
@@ -823,9 +839,9 @@ $(ONEAPI.tmpdir_y.dpc)/$(parameters_y.dpc:%.$y=%_link.txt): \
 $(WORKDIR.lib)/$(parameters_y.dpc): \
     $(WORKDIR.lib)/$(oneapi_y.dpc) \
     $(ONEAPI.tmpdir_y.dpc)/$(parameters_y.dpc:%.$y=%_link.txt) ; $(DPC.LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
-$(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(-fPIC)
+$(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(-fPIC) $(-lsections)
 $(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(daaldep.rt.dpc)
-$(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(if $(REQDBG),-flink-huge-device-code --offload-compress,)
+$(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(if $(REQDBG),-flink-huge-device-code,) $(-offloadcompress)
 ifndef OS_is_win
 $(WORKDIR.lib)/$(parameters_y.dpc): LOPT += $(-lsanitize.dpc)
 endif
@@ -865,7 +881,7 @@ THR_TBB.objs_y := $(addprefix $(THR.tmpdir_y)/,$(THR.srcs:%.cpp=%_tbb.$o))
 $(WORKDIR.lib)/$(thr_tbb_a): LOPT:=
 $(WORKDIR.lib)/$(thr_tbb_a): $(THR_TBB.objs_a) ; $(LINK.STATIC)
 
-$(WORKDIR.lib)/$(thr_tbb_y): LOPT += $(-fPIC) $(daaldep.rt.thr) $(-lsanitize)
+$(WORKDIR.lib)/$(thr_tbb_y): LOPT += $(-fPIC) $(-lsections) $(daaldep.rt.thr) $(-lsanitize)
 $(WORKDIR.lib)/$(thr_tbb_y): LOPT += $(if $(OS_is_win),-IMPLIB:$(@:%.dll=%_dll.lib),)
 $(WORKDIR.lib)/$(thr_tbb_y): $(THR_TBB.objs_y) $(if $(OS_is_win),$(THR.tmpdir_y)/dll_tbb.res,) ; $(LINK.DYNAMIC) ; $(LINK.DYNAMIC.POST)
 
@@ -874,7 +890,7 @@ THR.objs_y := $(THR_TBB.objs_y)
 THR_TBB.objs := $(THR_TBB.objs_a) $(THR_TBB.objs_y)
 THR.objs := $(THR.objs_a) $(THR.objs_y)
 
-$(THR.objs): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-Zl) $(-DEBC) -DDAAL_HIDE_DEPRECATED -DTBB_USE_ASSERT=0 -D_ENABLE_ATOMIC_ALIGNMENT_FIX
+$(THR.objs): COPT += $(-fPIC) $(-cxx17) $(-optlevel) $(-sections) $(-Zl) $(-DEBC) -DDAAL_HIDE_DEPRECATED -DTBB_USE_ASSERT=0 -D_ENABLE_ATOMIC_ALIGNMENT_FIX
 
 $(THR.objs_a): $(THR.tmpdir_a)/thr_inc_a_folders.txt
 $(THR.objs_a): COPT += @$(THR.tmpdir_a)/thr_inc_a_folders.txt
@@ -1013,8 +1029,8 @@ endif
 _release_c: ./deploy/pkg-config/pkg-config.cpp
 	mkdir -p $(RELEASEDIR.pkgconfig)
 # use the compiler's preprocessor to define the pkg-config file as it can handle cross-compilation, OS and ISA determination for all OSes.
-	$(COMPILER.$(_OS).$(COMPILER)) -E -DSTATIC ./deploy/pkg-config/pkg-config.cpp $(if $(OS_is_win),>,-o) $(WORKDIR.lib)/dal-static-threading-host.pc
-	$(COMPILER.$(_OS).$(COMPILER)) -E ./deploy/pkg-config/pkg-config.cpp $(if $(OS_is_win),>,-o) $(WORKDIR.lib)/dal-dynamic-threading-host.pc
+	$(COMPILER.$(_OS).$(COMPILER)) -E -DSTATIC $(pkgconfig.parameters_define) ./deploy/pkg-config/pkg-config.cpp $(if $(OS_is_win),>,-o) $(WORKDIR.lib)/dal-static-threading-host.pc
+	$(COMPILER.$(_OS).$(COMPILER)) -E $(pkgconfig.parameters_define) ./deploy/pkg-config/pkg-config.cpp $(if $(OS_is_win),>,-o) $(WORKDIR.lib)/dal-dynamic-threading-host.pc
 # insert license header, remove preprocessor header, swap to .pc file compliant comments, and remove quotes from the URL
 	{ head -n 16 ./deploy/pkg-config/pkg-config.cpp; cat $(WORKDIR.lib)/dal-static-threading-host.pc; } > $(RELEASEDIR.pkgconfig)/dal-static-threading-host.pc
 	sed $(sed.-i) '0,/^prefix/ { /^\/\//! { /^prefix/!d } }; /^#/d; /^\/\//s|^//|#|; /^URL:/s/"//g' $(RELEASEDIR.pkgconfig)/dal-static-threading-host.pc
@@ -1087,8 +1103,8 @@ endef
 $(foreach d,$(release.ONEAPI.HEADERS.COMMON),$(eval $(call .release.oneapi.dd,$d,$(subst $(CPPDIR)/,$(RELEASEDIR.include)/,$d),_release_oneapi_c_h)))
 $(foreach d,$(release.ONEAPI.HEADERS.OSSPEC),$(eval $(call .release.oneapi.dd,$d,$(subst $(CPPDIR)/,$(RELEASEDIR.include)/,$(subst _$(_OS),,$d)),_release_oneapi_c_h)))
 
-#----- releasing static/dynamic oneTBB libraries
-$(RELEASEDIR.tbb.libia) $(RELEASEDIR.tbb.soia): _release_common
+#----- releasing static/dynamic oneTBB & OpenBLAS libraries
+$(RELEASEDIR.tbb.libia) $(RELEASEDIR.tbb.soia) $(RELEASEDIR.open_blas.libia) $(RELEASEDIR.open_blas.soia): _release_common
 
 define .release.t
 _release_common: $2/$(notdir $1)
@@ -1096,11 +1112,13 @@ $2/$(notdir $1): $(call frompf1,$1) | $2/. ; $(value cpy)
 endef
 $(foreach t,$(releasetbb.LIBS_Y),$(eval $(call .release.t,$t,$(RELEASEDIR.tbb.soia))))
 $(foreach t,$(releasetbb.LIBS_A),$(eval $(call .release.t,$t,$(RELEASEDIR.tbb.libia))))
+$(foreach t,$(releaseopen_blas.LIBS_Y),$(eval $(call .release.t,$t,$(RELEASEDIR.open_blas.soia))))
+$(foreach t,$(releaseopen_blas.LIBS_A),$(eval $(call .release.t,$t,$(RELEASEDIR.open_blas.libia))))
 
 #----- cmake configs generation
 
 _release_cmake_configs:
-	$(if $(shell bash -c "command -v cmake"),cmake -DINSTALL_DIR=$(RELEASEDIR.lib)/cmake/oneDAL -DARCH_DIR_ONEDAL=$(ARCH_DIR_ONEDAL) -P cmake/scripts/generate_config.cmake,echo 'cmake configs generation skipped')
+	$(if $(shell bash -c "command -v cmake"),cmake -DINSTALL_DIR=$(RELEASEDIR.lib)/cmake/oneDAL -DARCH_DIR_ONEDAL=$(ARCH_DIR_ONEDAL) -DONEDAL_USE_PARAMETERS_LIBRARY=$(BUILD_PARAMETERS_LIB) -P cmake/scripts/generate_config.cmake,echo 'cmake configs generation skipped')
 
 #----- nuspecs generation
 _release_common: _release_nuspec
